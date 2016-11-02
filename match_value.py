@@ -29,15 +29,15 @@ class ExpectedNode(Node):
 
     def diff(self, actual_node):
         if not isinstance(actual_node, Node):
-            return NodeDiff(reason=DiffReason(DiffType.TYPES, NodeType.BUILTIN, self))
+            return NodeDiff(reason=DiffReason(DiffType.MISS_TYPES, actual_node, self))
 
         if actual_node.name != self.name:
             if self.absent is True:
                 return None
-            return NodeDiff(reason=DiffReason(DiffType.NAMES, actual_node.name, self))
+            return NodeDiff(reason=DiffReason(DiffType.NAMES, actual_node, self))
 
         if actual_node.type != self.type:
-            return NodeDiff(reason=DiffReason(DiffType.TYPES, actual_node.type, self))
+            return NodeDiff(reason=DiffReason(DiffType.MISS_TYPES, actual_node, self))
 
         if self.order is True:
             return self._diff_ordered_values(actual_node.values)
@@ -54,36 +54,58 @@ class ExpectedNode(Node):
     rate: 1/3
     """
     def _diff_unordered_values(self, actual_values):
-        # support fixed
+        # todo support fixed
         used_actuals = set()
-
-        # todo calc rate
+        value_list_diff = NodeDiff(reason=DiffReason(DiffType.VALUES_DIFF, actual_values, self.values))
         for expected_value in self.values:
-            # todo mb placeholder for none actual? preserve parents
-            min_diff = NodeDiff(reason=DiffReason(DiffType.VALUES_LESS, None, expected_value))
+            value_diff = NodeDiff(reason=DiffReason(DiffType.VALUE_NOT_FOUND, actual_values, expected_value))
             for idx, actual_value in enumerate(actual_values):
                 if idx in used_actuals:
                     continue
                 # todo extend to builtin
-                diff = expected_value.diff(actual_value)
-                if diff is None:
+                candidate_diff = expected_value.diff(actual_value)
+                if candidate_diff is None:
                     used_actuals.add(idx)
-                    continue
-                if min_diff > diff:
-                    min_diff = diff
-                elif min_diff == diff: # select with low level
-                    min_diff += diff
-        # todo to be continued ...
+                    value_diff = None
+                    value_list_diff.hits += 1
+                    break
+                value_diff.children.append(candidate_diff)
+            else:
+                value_list_diff.misses += 1
+                value_list_diff.children.append(value_diff)
+
+        return None if value_list_diff.misses == 0 else value_list_diff
+
+    def _diff_side_by_side(self, expected, actual):
+        if isinstance(expected, ExpectedNode):
+            return expected.diff(actual)
+        if type(expected) != type(actual):
+            return NodeDiff(reason=DiffReason(DiffType.MISS_TYPES, actual, expected))
+        if isinstance(expected, list):
+            return self._diff_builtin_lists(expected, actual)
+        elif type(expected) in [int, str, unicode]:
+            # TODO
+            pass
+        else:
+            return NodeDiff(reason=DiffReason(DiffType.UNK_TYPE, actual, expected))
+
+    def _diff_builtin_lists(self, expected, actual):
+        # TODO
+        pass
 
 
 class DiffType(object):
-    TYPES = 0,
-    NAMES = 1,
-    VALUES_MORE = 2,
-    VALUES_LESS = 3,
-    VALUE_NOT_EQUAL = 4
+    MISS_TYPES = 0
+    NAMES = 1
+    VALUES_MORE = 2
+    VALUES_LESS = 3
+    VALUES_DIFF = 4
+    VALUE_NOT_EQUAL = 5
+    VALUE_NOT_FOUND = 6
+    UNK_TYPE = 7
 
 
+# todo make classes for each type
 class DiffReason(object):
     def __init__(self, dtype, actual, expected):
         self.actual = None
@@ -93,26 +115,10 @@ class DiffReason(object):
 
 class NodeDiff(object):
     def __init__(self, reason, rate=100):
-        assert (reason)
-        self.rate = rate  # [0, 100] int
+        self.hits = 0
+        self.misses = 0
         self.reasons = [reason]
-
-        # from parent to child, parent mismatch has zero level
-        self.level = reason.expected.level
-
-    def __lt__(self, other):
-        return (self.level, self.rate) < (other.level, other.rate)
-
-    def __eq__(self, other):
-        return (not self < other) and (not other < self)
-
-    def __gt__(self, other):
-        return not self < other
-
-    def __iadd__(self, other):
-        if other != self:
-            raise RuntimeError('Cannot combine different level & rate diffs')
-        self.reasons += other.reasons
+        self.children = []
 
 """
 xml repr
