@@ -25,9 +25,12 @@
       <file leaf-file-name="match_value.py" pinned="false" current-in-tab="true">
         <entry file="file://$PROJECT_DIR$/match_value.py">
           <provider selected="true" editor-type-id="text-editor">
-            <state relative-caret-position="567">
-              <caret line="268" column="13" selection-start-line="268" selection-start-column="13" selection-end-line="268" selection-end-column="13" />
-              <folding />
+            <state relative-caret-position="342">
+              <caret line="122" column="66" selection-start-line="122" selection-start-column="66" selection-end-line="122" selection-end-column="66" />
+              <folding>
+                <element signature="e#6579#7504#1" expanded="false" />
+                <element signature="e#7533#7969#0" expanded="false" />
+              </folding>
             </state>
           </provider>
         </entry>
@@ -316,7 +319,10 @@
       <provider selected="true" editor-type-id="text-editor">
         <state relative-caret-position="0">
           <caret line="0" column="0" selection-start-line="0" selection-start-column="0" selection-end-line="0" selection-end-column="0" />
-          <folding />
+          <folding>
+            <element signature="e#6579#7504#1" expanded="false" />
+            <element signature="e#7533#7969#0" expanded="false" />
+          </folding>
         </state>
       </provider>
     </entry>
@@ -338,9 +344,12 @@
     </entry>
     <entry file="file://$PROJECT_DIR$/match_value.py">
       <provider selected="true" editor-type-id="text-editor">
-        <state relative-caret-position="567">
-          <caret line="268" column="13" selection-start-line="268" selection-start-column="13" selection-end-line="268" selection-end-column="13" />
-          <folding />
+        <state relative-caret-position="342">
+          <caret line="122" column="66" selection-start-line="122" selection-start-column="66" selection-end-line="122" selection-end-column="66" />
+          <folding>
+            <element signature="e#6579#7504#1" expanded="false" />
+            <element signature="e#7533#7969#0" expanded="false" />
+          </folding>
         </state>
       </provider>
     </entry>
