@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# coding=utf-8
 import collections
 
 __author__ = 'Yura'
@@ -68,9 +69,9 @@ class Expected(object):
     def __init__(self, node, anchor=False, absent=False, order=False, fixed=False):
         self.node = node
         self.anchor = anchor  # if this value is not found, do not process siblings
-        self.absent = absent # if this value is in actual output -- it is an error
-        self.order = order   # preserve order of children
-        self.fixed = fixed   # required children match, otherwise -- part is sufficient
+        self.absent = absent  # if this value is in actual output -- it is an error
+        self.order = order    # preserve order of children
+        self.fixed = fixed    # required all children match, otherwise -- part is sufficient
 
         if self.node.kind == Node.UNORDERED:
             self.order = False
@@ -102,85 +103,85 @@ class Expected(object):
         return str(self.node)
 
     def _diff_children(self, actual_parent):
-        # todo support anchor
-        expected_parent = self.node
-        diff_state = self._init_children_diff(actual_parent, expected_parent)
-        hypothesis, matched_actuals, matched_expected, children_diff = diff_state
+        return ChildrenDiffBuilder(actual_parent, self).build()
 
-        if children_diff.misses == 0:
-            if self._update_diff_fixed(actual_parent, expected_parent, matched_actuals, children_diff) is False:
-                return None
 
-        self._update_diff_hypotesis(
-            actual_parent,
-            expected_parent,
-            matched_actuals,
-            matched_expected,
-            hypothesis,
-            children_diff
-        )
+class ChildrenDiffBuilder(object):
+    def __init__(self, actual_parent, expected_parent):
+        self.actual_parent = actual_parent
+        self.expected_parent = expected_parent.node
+        self.settings = expected_parent
+        self.matched_actuals = set()
+        self.matched_expected = set()
+        self.result_diff = Diff(Diff.CHILDREN_DIFF, self.actual_parent, self.expected_parent, misses=0)
+        self.hypothesis = collections.defaultdict(dict)
 
-        return children_diff if children_diff.misses > 0 else None
-
-    def _init_children_diff(self, actual_parent, expected_parent):
-        matched_actuals = set()
-        matched_expected = set()
+    def _apply_side_by_side(self):
+        """
+        Проверяет присутствие элементов из множества ожидаемого среди элементов множества действительного
+        Обновляет статистику по совпадениям и промахам
+        Прикапывает всевозможные гипотезы для последующей фильтрации
+        """
         last_matched_idx = -1
         last_matched = None
 
-        children_diff = Diff(Diff.CHILDREN_DIFF, actual_parent, expected_parent, misses=0)
-        hypothesis = collections.defaultdict(dict)
-        for expected_idx, expected in enumerate(expected_parent.children):
-            for actual_idx, actual in enumerate(actual_parent.children):
-                if actual_idx in matched_actuals:
+        for expected_idx, expected in enumerate(self.expected_parent.children):
+            for actual_idx, actual in enumerate(self.actual_parent.children):
+                if actual_idx in self.matched_actuals:
                     continue
                 candidate_diff = expected.diff(actual)
                 if candidate_diff is None:
-                    if self.order and last_matched_idx > actual_idx:
-                        hypothesis[expected_idx][actual_idx] = Diff(
-                            Diff.CHILDREN_ORDER, last_matched, expected
-                        )
+                    if self.settings.order and last_matched_idx > actual_idx:
+                        reorder_diff = Diff(Diff.CHILDREN_ORDER, last_matched, expected)
+                        self.hypothesis[expected_idx][actual_idx] = reorder_diff
                         continue
-                    matched_actuals.add(actual_idx)
-                    matched_expected.add(expected_idx)
+                    self.matched_actuals.add(actual_idx)
+                    self.matched_expected.add(expected_idx)
                     last_matched_idx = actual_idx
                     last_matched = actual
-                    children_diff.hits += 1
+                    self.result_diff.hits += 1
                     break
-                hypothesis[expected_idx][actual_idx] = candidate_diff
+                self.hypothesis[expected_idx][actual_idx] = candidate_diff
             else:
-                children_diff.misses += 1
-        return hypothesis, matched_actuals, matched_expected, children_diff
+                self.result_diff.misses += 1
 
-    def _update_diff_fixed(self, actual_parent, expected_parent, matched_actuals, children_diff):
-        if self.fixed is False:
-            return False
-        for actual_idx, actual in enumerate(actual_parent.children):
-            if actual_idx in matched_actuals:
+    def _apply_rule_fixed(self):
+        """
+        Применяет сравнение фиксированных по длине списков
+        Применяется только если расслабленная проверка (без фиксированной длины) дала пустой дифф,
+        т.к. иначе будет зашумление гипотез
+        """
+        for actual_idx, actual in enumerate(self.actual_parent.children):
+            if actual_idx in self.matched_actuals:
                 continue
-            children_diff.children.append(Diff(Diff.VALUES_MORE, actual=actual, expected=expected_parent))
-            children_diff.misses += 1
-        return children_diff.misses > 0
+            child_diff = Diff(Diff.VALUES_MORE, actual=actual, expected=self.expected_parent)
+            self.result_diff.children.append(child_diff)
+            self.result_diff.misses += 1
 
-    def _update_diff_hypotesis(
-            self,
-            actual_parent,
-            expected_parent,
-            matched_actuals,
-            matched_expected,
-            hypothesis,
-            children_diff
-    ):
-        for expected_idx, expected in enumerate(expected_parent.children):
-            if expected_idx in matched_expected:
+    def _add_good_hypothesis(self):
+        """
+        Добавляет только рабочие гипотезы в результирующий дифф, в частности
+        пропускает гипотезы на ноды, которые уже сматчились
+        """
+        for expected_idx, expected in enumerate(self.expected_parent.children):
+            if expected_idx in self.matched_expected:
                 continue
-            child_diff = Diff(Diff.CHILD_NOT_FOUND, actual_parent, expected)
-            for actual_idx, actual in enumerate(actual_parent.children):
-                if actual_idx in matched_actuals:
+            child_diff = Diff(Diff.CHILD_NOT_FOUND, self.actual_parent, expected)
+            for actual_idx, actual in enumerate(self.actual_parent.children):
+                if actual_idx in self.matched_actuals:
                     continue
-                child_diff.children.append(hypothesis[expected_idx][actual_idx])
-            children_diff.children.append(child_diff)
-            children_diff.misses += 1
+                child_diff.children.append(self.hypothesis[expected_idx][actual_idx])
+            self.result_diff.children.append(child_diff)
+
+    def build(self):
+        # todo support anchor
+        self._apply_side_by_side()
+        if self.result_diff.misses:
+            self._add_good_hypothesis()
+        elif self.settings.fixed:
+            self._apply_rule_fixed()
+
+        return self.result_diff if self.result_diff.misses else None
 
 
 """
