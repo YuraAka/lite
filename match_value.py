@@ -160,7 +160,7 @@ class Expected(object):
                 continue
             children_diff.children.append(Diff(Diff.VALUES_MORE, actual=actual, expected=expected_parent))
             children_diff.misses += 1
-        return children_diff.misses != 0
+        return children_diff.misses > 0
 
     def _update_diff_hypotesis(
             self,
@@ -180,6 +180,7 @@ class Expected(object):
                     continue
                 child_diff.children.append(hypothesis[expected_idx][actual_idx])
             children_diff.children.append(child_diff)
+            children_diff.misses += 1
 
 
 """
