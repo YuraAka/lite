@@ -29,6 +29,12 @@ class Diff(object):
 
     # todo actual of type Actual, expected of type Expected
     def __init__(self, kind, actual, expected, hits=0, misses=1):
+        if not isinstance(actual, Actual):
+            raise RuntimeError("actual is not Actual")
+
+        if not isinstance(expected, Expected):
+            raise RuntimeError("expected is not Expected")
+
         self.hits = hits
         self.misses = misses
         self.children = []
@@ -44,13 +50,13 @@ class Diff(object):
         '{tab}kind = {kind}\n' \
         '{tab}hits = {hits}\n' \
         '{tab}misses = {misses}\n' \
-        '{tab}expected = {expected}\n' \
-        '{tab}actual = {actual}\n\n'.format(
+        '{tab}expected = \n{expected}\n' \
+        '{tab}actual = \n{actual}\n\n'.format(
             kind=self.kind,
             hits=self.hits,
             misses=self.misses,
-            expected=self.expected,
-            actual=self.actual,
+            expected=self.expected.node.render(level+1),
+            actual=self.actual.node.render(level+1),
             tab=' '*level
         )
 
@@ -112,26 +118,27 @@ class Expected(object):
 
     def diff(self, actual):
         # todo clean confusing Expected and Actual vs Expected.Node and Actual.Node
-        expected = self.node
-        actual = actual.node
+        expected = self
+        expected_node = self.node
+        actual_node = actual.node
         hits = 0
-        if not isinstance(actual, Node):
+        if not isinstance(actual_node, Node):
             return Diff(Diff.TYPES_NOT_EQUAL, actual, expected, hits=hits)
         hits += 1
 
         # equality compare is wrong, because extected root can have more props than matching actual node (nameless)
-        if actual.props - expected.props:
+        if actual_node.props - expected_node.props:
             return Diff(Diff.TYPES_NOT_EQUAL, actual, expected, hits=hits)
         hits += 1
 
-        if Node.NAMELESS not in expected.props:
-            if actual.name != expected.name:
+        if Node.NAMELESS not in expected_node.props:
+            if actual_node.name != expected_node.name:
                 if self.absent is True:
                     return None
                 return Diff(Diff.NAME_NOT_EQUAL, actual, expected, hits=hits)
             hits += 1
 
-        if expected.value is not None and actual.value != expected.value:
+        if expected_node.value is not None and actual_node.value != expected_node.value:
             return Diff(Diff.VALUE_NOT_EQUAL, actual, expected, hits=hits)
 
         return self._diff_children(actual)
@@ -146,8 +153,7 @@ class Expected(object):
 class ChildrenDiffBuilder(object):
     def __init__(self, actual_parent, expected_parent):
         self.actual_parent = actual_parent
-        self.expected_parent = expected_parent.node
-        self.settings = expected_parent
+        self.expected_parent = expected_parent
         self.matched_actuals = set()
         self.matched_expected = set()
         self.result_diff = Diff(Diff.CHILDREN_DIFF, self.actual_parent, self.expected_parent, misses=0)
@@ -162,13 +168,13 @@ class ChildrenDiffBuilder(object):
         last_matched_idx = -1
         last_matched = None
 
-        for expected_idx, expected in enumerate(self.expected_parent.children):
-            for actual_idx, actual in enumerate(self.actual_parent.children):
+        for expected_idx, expected in enumerate(self.expected_parent.node.children):
+            for actual_idx, actual in enumerate(self.actual_parent.node.children):
                 if actual_idx in self.matched_actuals:
                     continue
                 candidate_diff = expected.diff(actual)
                 if candidate_diff is None:
-                    if self.settings.order and last_matched_idx > actual_idx:
+                    if self.expected_parent.order and last_matched_idx > actual_idx:
                         reorder_diff = Diff(Diff.CHILDREN_ORDER, last_matched, expected)
                         self.hypothesis[expected_idx][actual_idx] = reorder_diff
                         continue
@@ -188,7 +194,7 @@ class ChildrenDiffBuilder(object):
         Применяется только если расслабленная проверка (без фиксированной длины) дала пустой дифф,
         т.к. иначе будет зашумление гипотез
         """
-        for actual_idx, actual in enumerate(self.actual_parent.children):
+        for actual_idx, actual in enumerate(self.actual_parent.node.children):
             if actual_idx in self.matched_actuals:
                 continue
             child_diff = Diff(Diff.VALUES_MORE, actual=actual, expected=self.expected_parent)
@@ -200,11 +206,11 @@ class ChildrenDiffBuilder(object):
         Добавляет только рабочие гипотезы в результирующий дифф, в частности
         пропускает гипотезы на ноды, которые уже сматчились
         """
-        for expected_idx, expected in enumerate(self.expected_parent.children):
+        for expected_idx, expected in enumerate(self.expected_parent.node.children):
             if expected_idx in self.matched_expected:
                 continue
             child_diff = Diff(Diff.CHILD_NOT_FOUND, self.actual_parent, expected)
-            for actual_idx, actual in enumerate(self.actual_parent.children):
+            for actual_idx, actual in enumerate(self.actual_parent.node.children):
                 if actual_idx in self.matched_actuals:
                     continue
                 child_diff.children.append(self.hypothesis[expected_idx][actual_idx])
@@ -215,7 +221,7 @@ class ChildrenDiffBuilder(object):
         self._apply_side_by_side()
         if self.result_diff.misses:
             self._add_good_hypothesis()
-        elif self.settings.fixed:
+        elif self.expected_parent.fixed:
             self._apply_rule_fixed()
 
         return self.result_diff if self.result_diff.misses else None
@@ -491,7 +497,7 @@ def test_json_encode():
     actual = {
         'hello': [1, 2, 3],
         'world': {
-            'name': [4, 5],
+            'name1': [4, 5],
             'color': 'red'
         }
     }
@@ -499,7 +505,7 @@ def test_json_encode():
     actual_str = json.dumps(actual)
 
     expected = {
-        'name': [4, 5],
+        'name1': [4, 5],
         'color': 'red'
     }
 
