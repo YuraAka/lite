@@ -1,8 +1,18 @@
 #!/usr/bin/env python
 # coding=utf-8
 import collections
+import json
 
 __author__ = 'Yura'
+
+
+# todo test
+"""
+todo:
+- json codec
+- anchor support
+- xml codec
+"""
 
 
 class Diff(object):
@@ -17,6 +27,7 @@ class Diff(object):
     VALUE_UNEXP_EQUAL = 'VALUE UNEXP EQUAL'
     CHILDREN_ORDER = 'CHILDREN ORDER'
 
+    # todo actual of type Actual, expected of type Expected
     def __init__(self, kind, actual, expected, hits=0, misses=1):
         self.hits = hits
         self.misses = misses
@@ -38,8 +49,8 @@ class Diff(object):
             kind=self.kind,
             hits=self.hits,
             misses=self.misses,
-            expected = self.expected,
-            actual = self.actual,
+            expected=self.expected,
+            actual=self.actual,
             tab=' '*level
         )
 
@@ -50,19 +61,42 @@ class Diff(object):
 
 
 class Node(object):
-    REGULAR = 'REG'  # general node
-    NAMELESS = 'NAMELESS'  # element that has no name
-    UNORDERED = 'UNORDER'  # holds collection of nodes without order
+    NAMELESS = 'NAMELESS'  # element with irrelevant name
+    UNORDERED = 'UNORDERED'  # holds collection of nodes without order
 
-    def __init__(self, name=None, children=None, kind=None, value=None):
+    def __init__(self, name=None, children=None, props=None, value=None):
         self.parent = None
         self.name = name
         self.value = value   # built-in value or matcher
         self.children = children or []  # list of Nodes
-        self.kind = kind or Node.REGULAR
+        self.props = props or set()
 
     def __repr__(self):
-        return 'name={}; value={}; kind={}'.format(self.name, self.value, self.kind)
+        return self.render(0)
+
+    def render(self, level):
+        out = \
+            '{tab}name = {name}\n' \
+            '{tab}value = {value}\n' \
+            '{tab}props = {props}\n\n'.format(
+                name=self.name,
+                value=self.value,
+                props=self.props,
+                tab=' ' * level
+            )
+
+        for child in self.children:
+            out += child.node.render(level + 1)
+
+        return out
+
+
+class Actual(object):
+    def __init__(self, node):
+        self.node = node
+
+    def __repr__(self):
+        return repr(self.node)
 
 
 class Expected(object):
@@ -73,21 +107,24 @@ class Expected(object):
         self.order = order    # preserve order of children
         self.fixed = fixed    # required all children match, otherwise -- part is sufficient
 
-        if self.node.kind == Node.UNORDERED:
+        if Node.UNORDERED in self.node.props:
             self.order = False
 
     def diff(self, actual):
+        # todo clean confusing Expected and Actual vs Expected.Node and Actual.Node
         expected = self.node
+        actual = actual.node
         hits = 0
         if not isinstance(actual, Node):
             return Diff(Diff.TYPES_NOT_EQUAL, actual, expected, hits=hits)
         hits += 1
 
-        if actual.kind != expected.kind:
+        # equality compare is wrong, because extected root can have more props than matching actual node (nameless)
+        if actual.props - expected.props:
             return Diff(Diff.TYPES_NOT_EQUAL, actual, expected, hits=hits)
         hits += 1
 
-        if expected.kind is not Node.NAMELESS:
+        if Node.NAMELESS not in expected.props:
             if actual.name != expected.name:
                 if self.absent is True:
                     return None
@@ -184,6 +221,73 @@ class ChildrenDiffBuilder(object):
         return self.result_diff if self.result_diff.misses else None
 
 
+class JsonCodec(object):
+    @classmethod
+    def encode_actual(cls, text):
+        """
+        Encodes textual representation of actual json to tree of Nodes
+        :param text: json string under test
+        :return: tree of Nodes
+        """
+        src = json.loads(text)
+        result = cls._encode_obj('_', src, lambda x: Actual(x))
+        result.node.props.add(Node.NAMELESS)
+        return result
+
+    @classmethod
+    def encode_expected(cls, src):
+        """
+        Encodes textual representation of json-expectation to tree of Expected
+        :param text: json-expectation
+        :return: tree of Expected
+        """
+
+        # todo anchor can be represented in wrapper: &name => name with anchor
+        result = cls._encode_obj('_', src, lambda x: Expected(x))
+        result.node.props.add(Node.NAMELESS)
+        return result
+
+    @classmethod
+    def decode(cls, diff):
+        """
+        Decodes differences in json form
+        :param diff: tree of Diff
+        :return: json comparison representation
+        """
+        pass
+
+    @classmethod
+    def _encode_obj(cls, name, value, wrap):
+        if isinstance(value, dict):
+            return cls._encode_dict(name, value, wrap)
+        if isinstance(value, list):
+            return cls._encode_list(name, value, wrap)
+        if isinstance(value, (int, float, str, unicode)) or value is None:
+            return cls._encode_atom(name, value, wrap)
+        raise RuntimeError('Unsupported type of {}: {} => {}'.format(name, value, type(value)))
+
+    @classmethod
+    def _encode_dict(cls, name, value, wrap):
+        result = Node(name=name, props={Node.UNORDERED})
+        for child_name, child_value in value.iteritems():
+            result_child = cls._encode_obj(child_name, child_value, wrap)
+            result.children.append(result_child)
+        return wrap(result)
+
+    @classmethod
+    def _encode_list(cls, name, value, wrap):
+        result = Node(name=name)
+        for child_idx, child_value in enumerate(value):
+            result_child = cls._encode_obj(str(child_idx), child_value, wrap)
+            result_child.node.props.add(Node.NAMELESS)
+            result.children.append(result_child)
+        return wrap(result)
+
+    @classmethod
+    def _encode_atom(cls, name, value, wrap):
+        return wrap(Node(name=name, value=value))
+
+
 """
 xml repr
 <node attr1="1" attr2="2">
@@ -253,30 +357,30 @@ Node
 
 
 def test_good_list():
-    actual = Node(name='list', children=[
-        Node(name='0', value=1, kind=Node.NAMELESS),
-        Node(name='1', value=2, kind=Node.NAMELESS),
-        Node(name='2', value=3, kind=Node.NAMELESS)
-    ])
+    actual = Actual(Node(name='list', children=[
+        Actual(Node(name='0', value=1, props={Node.NAMELESS})),
+        Actual(Node(name='1', value=2, props={Node.NAMELESS})),
+        Actual(Node(name='2', value=3, props={Node.NAMELESS}))
+    ]))
 
     expected = Expected(node=Node(name='list', children=[
-        Expected(Node(name='0', value=2, kind=Node.NAMELESS)),
-        Expected(Node(name='1', value=3, kind=Node.NAMELESS))
+        Expected(Node(name='0', value=2, props={Node.NAMELESS})),
+        Expected(Node(name='1', value=3, props={Node.NAMELESS}))
     ]))
 
     assert expected.diff(actual) is None
 
 
 def test_bad_list():
-    actual = Node(name='list', children=[
-        Node(name='0', value=1, kind=Node.NAMELESS),
-        Node(name='1', value=2, kind=Node.NAMELESS),
-        Node(name='2', value=3, kind=Node.NAMELESS)
-    ])
+    actual = Actual(Node(name='list', children=[
+        Actual(Node(name='0', value=1, props={Node.NAMELESS})),
+        Actual(Node(name='1', value=2, props={Node.NAMELESS})),
+        Actual(Node(name='2', value=3, props={Node.NAMELESS}))
+    ]))
 
     expected = Expected(node=Node(name='list', children=[
-        Expected(Node(name='0', value=2, kind=Node.NAMELESS)),
-        Expected(Node(name='1', value=4, kind=Node.NAMELESS))
+        Expected(Node(name='0', value=2, props={Node.NAMELESS})),
+        Expected(Node(name='1', value=4, props={Node.NAMELESS}))
     ]))
 
     actout = str(expected.diff(actual))
@@ -286,60 +390,61 @@ def test_bad_list():
 
 
 def test_bad_list_ordered():
-    actual = Node(name='list', children=[
-        Node(name='0', value=1, kind=Node.NAMELESS),
-        Node(name='1', value=2, kind=Node.NAMELESS),
-        Node(name='2', value=3, kind=Node.NAMELESS)
-    ])
+    actual = Actual(Node(name='list', children=[
+        Actual(Node(name='0', value=1, props={Node.NAMELESS})),
+        Actual(Node(name='1', value=2, props={Node.NAMELESS})),
+        Actual(Node(name='2', value=3, props={Node.NAMELESS}))
+    ]))
 
     expected = Expected(order=True, node=Node(name='list', children=[
-        Expected(Node(name='0', value=3, kind=Node.NAMELESS)),
-        Expected(Node(name='1', value=2, kind=Node.NAMELESS))
+        Expected(Node(name='0', value=3, props={Node.NAMELESS})),
+        Expected(Node(name='1', value=2, props={Node.NAMELESS}))
     ]))
 
     assert 'CHILDREN ORDER' in str(expected.diff(actual))
 
+
 def test_good_list_ordered():
-    actual = Node(name='list', children=[
-        Node(name='0', value=1, kind=Node.NAMELESS),
-        Node(name='1', value=2, kind=Node.NAMELESS),
-        Node(name='2', value=3, kind=Node.NAMELESS)
-    ])
+    actual = Actual(Node(name='list', children=[
+        Actual(Node(name='0', value=1, props={Node.NAMELESS})),
+        Actual(Node(name='1', value=2, props={Node.NAMELESS})),
+        Actual(Node(name='2', value=3, props={Node.NAMELESS}))
+    ]))
 
     expected = Expected(order=True, node=Node(name='list', children=[
-        Expected(Node(name='0', value=1, kind=Node.NAMELESS)),
-        Expected(Node(name='1', value=3, kind=Node.NAMELESS))
+        Expected(Node(name='0', value=1, props={Node.NAMELESS})),
+        Expected(Node(name='1', value=3, props={Node.NAMELESS}))
     ]))
 
     assert expected.diff(actual) is None
 
 
 def test_good_list_ordered2():
-    actual = Node(name='list', children=[
-        Node(name='0', value=1, kind=Node.NAMELESS),
-        Node(name='1', value=2, kind=Node.NAMELESS),
-        Node(name='2', value=1, kind=Node.NAMELESS)
-    ])
+    actual = Actual(Node(name='list', children=[
+        Actual(Node(name='0', value=1, props={Node.NAMELESS})),
+        Actual(Node(name='1', value=2, props={Node.NAMELESS})),
+        Actual(Node(name='2', value=1, props={Node.NAMELESS}))
+    ]))
 
     expected = Expected(order=True, node=Node(name='list', children=[
-        Expected(Node(name='0', value=2, kind=Node.NAMELESS)),
-        Expected(Node(name='1', value=1, kind=Node.NAMELESS))
+        Expected(Node(name='0', value=2, props={Node.NAMELESS})),
+        Expected(Node(name='1', value=1, props={Node.NAMELESS}))
     ]))
 
     assert expected.diff(actual) is None
 
 
 def test_good_attrs_ordered():
-    actual = Node(name='node', children=[
-        Node(name='__xml_attributes__', kind=Node.UNORDERED, children=[
-            Node(name='attr0', value=0),
-            Node(name='attr1', value=1),
-            Node(name='attr2', value=2)
-        ])
-    ])
+    actual = Actual(Node(name='node', children=[
+        Actual(Node(name='__xml_attributes__', props={Node.UNORDERED}, children=[
+            Actual(Node(name='attr0', value=0)),
+            Actual(Node(name='attr1', value=1)),
+            Actual(Node(name='attr2', value=2))
+        ]))
+    ]))
 
     expected = Expected(order=True, node=Node(name='node', children=[
-        Expected(Node(name='__xml_attributes__', kind=Node.UNORDERED, children=[
+        Expected(Node(name='__xml_attributes__', props={Node.UNORDERED}, children=[
             Expected(Node(name='attr2', value=2)),
             Expected(Node(name='attr1', value=1)),
         ]))
@@ -349,16 +454,16 @@ def test_good_attrs_ordered():
 
 
 def test_bad_attrs():
-    actual = Node(name='node', children=[
-        Node(name='__xml_attributes__', kind=Node.UNORDERED, children=[
-            Node(name='attr0', value=0),
-            Node(name='attr1', value=1),
-            Node(name='attr2', value=2)
-        ])
-    ])
+    actual = Actual(Node(name='node', children=[
+        Actual(Node(name='__xml_attributes__', props={Node.UNORDERED}, children=[
+            Actual(Node(name='attr0', value=0)),
+            Actual(Node(name='attr1', value=1)),
+            Actual(Node(name='attr2', value=2))
+        ]))
+    ]))
 
     expected = Expected(node=Node(name='node', children=[
-        Expected(Node(name='__xml_attributes__', kind=Node.UNORDERED, children=[
+        Expected(Node(name='__xml_attributes__', props={Node.UNORDERED}, children=[
             Expected(Node(name='attr2', value=3)),
             Expected(Node(name='attr1', value=1))
         ]))
@@ -368,11 +473,11 @@ def test_bad_attrs():
 
 
 def test_fixed_bad():
-    actual = Node(name='node', children=[
-        Node(name='zero', value=0),
-        Node(name='one', value=1),
-        Node(name='two', value=2)
-    ])
+    actual = Actual(Node(name='node', children=[
+        Actual(Node(name='zero', value=0)),
+        Actual(Node(name='one', value=1)),
+        Actual(Node(name='two', value=2))
+    ]))
 
     expected = Expected(fixed=True, node=Node(name='node', children=[
         Expected(Node(name='zero', value=0)),
@@ -380,6 +485,28 @@ def test_fixed_bad():
     ]))
 
     assert 'VALUES MORE' in str(expected.diff(actual))
+
+
+def test_json_encode():
+    actual = {
+        'hello': [1, 2, 3],
+        'world': {
+            'name': [4, 5],
+            'color': 'red'
+        }
+    }
+
+    actual_str = json.dumps(actual)
+
+    expected = {
+        'name': [4, 5],
+        'color': 'red'
+    }
+
+    actual_int = JsonCodec.encode_actual(actual_str)
+    expected_int = JsonCodec.encode_expected(expected)
+
+    print expected_int.diff(actual_int)
 
 
 if __name__ == '__main__':
@@ -391,3 +518,4 @@ if __name__ == '__main__':
     test_good_attrs_ordered()
     test_bad_attrs()
     test_fixed_bad()
+    test_json_encode()
