@@ -26,6 +26,7 @@ class Diff(object):
     UNK_TYPE = 'UNK TYPE'
     VALUE_UNEXP_EQUAL = 'VALUE UNEXP EQUAL'
     CHILDREN_ORDER = 'CHILDREN ORDER'
+    SUBTREE_NOT_FOUND = 'SUBTREE_NOT_FOUND'
 
     # todo actual of type Actual, expected of type Expected
     def __init__(self, kind, actual, expected, hits=0, misses=1):
@@ -55,9 +56,9 @@ class Diff(object):
             kind=self.kind,
             hits=self.hits,
             misses=self.misses,
-            expected=self.expected.node.render(level+1),
-            actual=self.actual.node.render(level+1),
-            tab=' '*level
+            expected=self.expected.node.render(level+1, recurse=False),
+            actual=self.actual.node.render(level+1, recurse=False),
+            tab='-'*level
         )
 
         for child in self.children:
@@ -80,7 +81,7 @@ class Node(object):
     def __repr__(self):
         return self.render(0)
 
-    def render(self, level):
+    def render(self, level, recurse=True):
         out = \
             '{tab}name = {name}\n' \
             '{tab}value = {value}\n' \
@@ -91,8 +92,9 @@ class Node(object):
                 tab=' ' * level
             )
 
-        for child in self.children:
-            out += child.node.render(level + 1)
+        if recurse is True:
+            for child in self.children:
+                out += child.node.render(level + 1)
 
         return out
 
@@ -117,28 +119,41 @@ class Expected(object):
             self.order = False
 
     def diff(self, actual):
-        # todo clean confusing Expected and Actual vs Expected.Node and Actual.Node
         expected = self
-        expected_node = self.node
-        actual_node = actual.node
+        result_diff = Diff(Diff.SUBTREE_NOT_FOUND, actual, expected, misses=0)
+        for actual_candidate in self._traverse(actual):
+            candidate_diff = self._diff_from_root(actual_candidate)
+            if candidate_diff is None:
+                return None
+            result_diff.children.append(candidate_diff)
+            result_diff.misses += 1
+        return result_diff
+
+    def _traverse(self, root):
+        yield root
+        for child in root.node.children:
+            yield next(self._traverse(child))
+
+    def _diff_from_root(self, actual):
+        expected = self
         hits = 0
-        if not isinstance(actual_node, Node):
+        if not isinstance(actual.node, Node):
             return Diff(Diff.TYPES_NOT_EQUAL, actual, expected, hits=hits)
         hits += 1
 
         # equality compare is wrong, because extected root can have more props than matching actual node (nameless)
-        if actual_node.props - expected_node.props:
+        if actual.node.props - expected.node.props:
             return Diff(Diff.TYPES_NOT_EQUAL, actual, expected, hits=hits)
         hits += 1
 
-        if Node.NAMELESS not in expected_node.props:
-            if actual_node.name != expected_node.name:
+        if Node.NAMELESS not in expected.node.props:
+            if actual.node.name != expected.node.name:
                 if self.absent is True:
                     return None
                 return Diff(Diff.NAME_NOT_EQUAL, actual, expected, hits=hits)
             hits += 1
 
-        if expected_node.value is not None and actual_node.value != expected_node.value:
+        if expected.node.value is not None and actual.node.value != expected.node.value:
             return Diff(Diff.VALUE_NOT_EQUAL, actual, expected, hits=hits)
 
         return self._diff_children(actual)
@@ -512,7 +527,7 @@ def test_json_encode():
     actual_int = JsonCodec.encode_actual(actual_str)
     expected_int = JsonCodec.encode_expected(expected)
 
-    print expected_int.diff(actual_int)
+    assert expected_int.diff(actual_int) is None
 
 
 if __name__ == '__main__':
