@@ -6,10 +6,10 @@ import json
 __author__ = 'Yura'
 
 
-# todo test
 """
 todo:
 - json codec
+- most probable hypotesis selection
 - anchor support
 - xml codec
 """
@@ -28,7 +28,6 @@ class Diff(object):
     CHILDREN_ORDER = 'CHILDREN ORDER'
     SUBTREE_NOT_FOUND = 'SUBTREE_NOT_FOUND'
 
-    # todo actual of type Actual, expected of type Expected
     def __init__(self, kind, actual, expected, hits=0, misses=1):
         if not isinstance(actual, Actual):
             raise RuntimeError("actual is not Actual")
@@ -46,23 +45,58 @@ class Diff(object):
     def __repr__(self):
         return self.render(0)
 
-    def render(self, level):
+    @property
+    def depth(self):
+        return max([child.depth for child in self.children]) + 1 if self.children else 1
+
+    def prune(self):
+        def depth(diff):
+            return diff.depth
+
+        def rate(diff):
+            return diff.hits, -diff.misses
+
+        self.prune_by(rate)
+        print 'PRUNE BY DEPTH'
+        self.prune_by(depth)
+
+    def prune_by(self, key):
+        if len(self.children) == 0:
+            return
+
+        def equal(lhs, rhs):
+            return key(lhs) == key(rhs)
+
+        # sort do not work. why???
+        self.children.sort(key=key, reverse=True)
+        print [c.depth for c in self.children]
+        self.children = [child for child in self.children if equal(child, self.children[0])]
+
+        for child in self.children:
+            child.prune_by(key)
+
+    def render(self, level, depth=None):
         out = \
         '{tab}kind = {kind}\n' \
         '{tab}hits = {hits}\n' \
         '{tab}misses = {misses}\n' \
-        '{tab}expected = \n{expected}\n' \
-        '{tab}actual = \n{actual}\n\n'.format(
+        '{tab}depth = {depth}\n' \
+        '{tab}expected = {expected}\n' \
+        '{tab}actual = {actual}\n\n'.format(
             kind=self.kind,
             hits=self.hits,
             misses=self.misses,
-            expected=self.expected.node.render(level+1, recurse=False),
-            actual=self.actual.node.render(level+1, recurse=False),
-            tab='-'*level
+            expected=self.expected.node.path, #self.expected.node.render(level+1, recurse=False),
+            actual=self.actual.node.path,#self.actual.node.render(level+1, recurse=False),
+            tab='-'*level,
+            depth=self.depth
         )
 
-        for child in self.children:
-            out += child.render(level+1)
+        if depth is None or depth > 0:
+            if depth is not None:
+                depth -= 1
+            for child in self.children:
+                out += child.render(level+1, depth)
 
         return out
 
@@ -71,8 +105,8 @@ class Node(object):
     NAMELESS = 'NAMELESS'  # element with irrelevant name
     UNORDERED = 'UNORDERED'  # holds collection of nodes without order
 
-    def __init__(self, name=None, children=None, props=None, value=None):
-        self.parent = None
+    def __init__(self, name=None, children=None, props=None, value=None, parent=None):
+        self.parent = parent
         self.name = name
         self.value = value   # built-in value or matcher
         self.children = children or []  # list of Nodes
@@ -80,6 +114,15 @@ class Node(object):
 
     def __repr__(self):
         return self.render(0)
+
+    @property
+    def path(self):
+        names = [self.name]
+        parent = self.parent
+        while parent is not None:
+            names.append(parent.name)
+            parent = parent.parent
+        return '/'.join(reversed(names))
 
     def render(self, level, recurse=True):
         out = \
@@ -127,6 +170,8 @@ class Expected(object):
                 return None
             result_diff.children.append(candidate_diff)
             result_diff.misses += 1
+
+        # todo select most possible failure or say, that it is absent (no dummy hypothesis)
         return result_diff
 
     def _traverse(self, root):
@@ -224,7 +269,8 @@ class ChildrenDiffBuilder(object):
         for expected_idx, expected in enumerate(self.expected_parent.node.children):
             if expected_idx in self.matched_expected:
                 continue
-            child_diff = Diff(Diff.CHILD_NOT_FOUND, self.actual_parent, expected)
+            absent = Actual(Node('<absent>', parent=self.actual_parent.node))
+            child_diff = Diff(Diff.CHILD_NOT_FOUND, absent, expected)
             for actual_idx, actual in enumerate(self.actual_parent.node.children):
                 if actual_idx in self.matched_actuals:
                     continue
@@ -251,7 +297,7 @@ class JsonCodec(object):
         :return: tree of Nodes
         """
         src = json.loads(text)
-        result = cls._encode_obj('_', src, lambda x: Actual(x))
+        result = cls._encode_obj('<root>', src, lambda x: Actual(x))
         result.node.props.add(Node.NAMELESS)
         return result
 
@@ -264,7 +310,7 @@ class JsonCodec(object):
         """
 
         # todo anchor can be represented in wrapper: &name => name with anchor
-        result = cls._encode_obj('_', src, lambda x: Expected(x))
+        result = cls._encode_obj('<root>', src, lambda x: Expected(x))
         result.node.props.add(Node.NAMELESS)
         return result
 
@@ -292,6 +338,7 @@ class JsonCodec(object):
         result = Node(name=name, props={Node.UNORDERED})
         for child_name, child_value in value.iteritems():
             result_child = cls._encode_obj(child_name, child_value, wrap)
+            result_child.node.parent = result
             result.children.append(result_child)
         return wrap(result)
 
@@ -301,6 +348,7 @@ class JsonCodec(object):
         for child_idx, child_value in enumerate(value):
             result_child = cls._encode_obj(str(child_idx), child_value, wrap)
             result_child.node.props.add(Node.NAMELESS)
+            result_child.node.parent = result
             result.children.append(result_child)
         return wrap(result)
 
@@ -508,7 +556,7 @@ def test_fixed_bad():
     assert 'VALUES MORE' in str(expected.diff(actual))
 
 
-def test_json_encode():
+def test_json_encode_good():
     actual = {
         'hello': [1, 2, 3],
         'world': {
@@ -530,6 +578,30 @@ def test_json_encode():
     assert expected_int.diff(actual_int) is None
 
 
+def test_json_encode_bad():
+    actual = {
+        'hello': [1, 2, 3],
+        'world': {
+            'name1': [4, 5],
+            'color': 'red'
+        }
+    }
+
+    actual_str = json.dumps(actual)
+
+    expected = {
+        'name1': [4, 5, 6],
+        'color': 'red'
+    }
+
+    actual_int = JsonCodec.encode_actual(actual_str)
+    expected_int = JsonCodec.encode_expected(expected)
+
+    diff = expected_int.diff(actual_int)
+    diff.prune()
+    print diff.render(0)
+
+
 if __name__ == '__main__':
     test_good_list()
     test_bad_list()
@@ -539,4 +611,5 @@ if __name__ == '__main__':
     test_good_attrs_ordered()
     test_bad_attrs()
     test_fixed_bad()
-    test_json_encode()
+    test_json_encode_good()
+    test_json_encode_bad()
