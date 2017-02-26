@@ -260,20 +260,53 @@ class AggregationDiff(Diff):
         return 100 * self.__hits / (self.__hits + self.__misses)
 
 
-class MatchResult(object):
-    def __init__(self, match, text=None):
+class FitSnippet(object):
+    def __init__(self):
+        self.actual = None
+        self.expected = None
+
+
+class FitResult(object):
+    @staticmethod
+    def success():
+        return FitResult(success=True)
+
+    @staticmethod
+    def ignore():
+        return FitResult(ignore=True)
+
+    def __init__(self, text=None, success=False, snippet=None, ignore=False):
+        # textual description of mismatch
         self.text = text
-        self.match = match
+
+        # output snippet to compare differences
+        self.snippet = snippet
+
+        # exact match
+        self.success = success if not ignore else False
+
+        # full mismatch and dont worth to be analysed
+        self.ignore = ignore
+
+    def __nonzero__(self):
+        return self.success
 
 
 class Node(object):
-    def __init__(self, children=None):
+    def __init__(self, children=None, capture=False):
         self.parent = None
-        self.position = None
+
+        # использовать при выводе сниппета
+        self.tag = None
+
+        # где-то в иерархии узлов есть capture-узел -- это изменяет логику проверок: надо крутить циклы до конца,
+        # а не выходить при первом хите, т.к. нужно посетить все потенциально подходящие фрагменты
+        self.capture = capture
         self.children = children or []
         for idx, child in enumerate(self.children):
             child.parent = self
             child.position = idx
+            self.capture = self.capture or child.capture
 
     def __iter__(self):
         yield self
@@ -293,19 +326,23 @@ class Node(object):
 class AtomNode(Node):
     @staticmethod
     def type_of(obj):
-        return isinstance(obj, (int,str,bool))
+        return isinstance(obj, (int,str,bool,float))
 
     def __init__(self, value, absent=False):
         super(self.__class__, self).__init__()
         if not AtomNode.type_of(value):
             raise RuntimeError('bad atom type')
         self.value = value
-        self.absent = absent
+
+    def __repr__(self):
+        return 'Atom({})'.format(self.value)
 
     def fit(self, other):
-        if self.absent is False:
-            return self.value == other.value
-        return self.value != other.value
+        if not isinstance(other, AtomNode):
+            return FitResult.ignore()
+        if self.value == other.value:
+            return FitResult.success()
+        return FitResult(text='{} != {}'.format(self.value, other.value))
 
 
 class NamedNode(Node):
@@ -315,8 +352,10 @@ class NamedNode(Node):
         self.value = value
 
     def fit(self, other):
+        if not isinstance(other, NamedNode):
+            return FitResult.ignore()
         if self.name != other.name:
-            return False
+            return FitResult(text='names {} != {}'.format(self.name, other.name))
         return self.value.fit(other.value)
 
 
@@ -326,22 +365,69 @@ class ListNode(Node):
 
     def fit(self, other):
         """
+        Перебирает все узлы из действительной иерархии, примеряя ее на текущее ожидание
+        capture -- перебрать все узлы для сбора данных и проверки последовательности
+        """
+        # todo describe better
+        result = FitResult(text='cannot find list')
+        for actual in other:
+            local_result = self._fit_local(actual)
+            if local_result:
+                result = FitResult.success()
+                if self.capture is False:
+                    return result
+            elif not result.success and not local_result.ignore:
+                # selection logic
+                result = local_result
+        return result
+
+    def _fit_local(self, other):
+        """
+        Сравнивает выбранный корень в действительной иерархии с текущей ожидаемой
         Проверяет присутствие элементов из множества ожидаемого среди элементов множества действительного
         Обновляет статистику по совпадениям и промахам
         Прикапывает всевозможные гипотезы для последующей фильтрации
         """
+        if not isinstance(other, ListNode):
+            return FitResult.ignore()
         used_actuals = set()
         used_expected = set()
         for expected_idx, expected in enumerate(self.children):
             for actual_idx, actual in enumerate(other.children):
                 if actual_idx in used_actuals:
                     continue
-                if expected.fit(actual) is True:
+                does_fit = expected.fit(actual)
+                if does_fit:
                     used_actuals.add(actual_idx)
                     used_expected.add(expected_idx)
                     break
 
-        return len(used_expected) == len(self.children)
+        if len(used_expected) == len(self.children):
+            return FitResult.success()
+        return FitResult(text='subchildren are not matched')
+
+
+class CaptureNode(Node):
+    def __init__(self):
+        super(self.__class__, self).__init__(capture=True)
+        self.captured = []
+
+    def fit(self, other):
+        if not isinstance(other, AtomNode):
+            return FitResult.ignore()
+        self.captured.append(other.value)
+        return FitResult.success()
+
+    def increased(self):
+        return all(x < y for x, y in zip(self.captured, self.captured[1:]))
+
+    def __add__(self, other):
+        if len(self.captured) != len(other.captured) or len(self.captured) == 0:
+            return None
+        sum = [x + y for x, y in zip(self.captured, other.captured)]
+        if all(x == sum[0] for x in sum):
+            return sum[0]
+        return None
 
 # ====
 
@@ -400,38 +486,6 @@ class Expected(object):
 
     def _diff_children(self, actual_parent):
         return ChildrenDiffBuilder(actual_parent, self).build()
-
-
-def compare_trees(actual, expected, diff_observer=None):
-    for actual_candidate in actual.node:
-        diff = compare_branches(actual_candidate, expected)
-        if diff is None:
-            return True
-        if diff_observer is not None:
-            diff_observer(diff)
-    return False
-
-
-def compare_branches(actual, expected):
-    if actual.node.kind != expected.node.kind:
-        return 'node not found'
-
-    return expected.diff(actual)
-
-    if Node.NAMELESS not in expected.node.props:
-        if actual.node.name != expected.node.name:
-            return Diff.names_mismatch(actual, expected) if expected.absent is False else None
-        elif expected.absent is True:
-            return Diff.unexpected_node(actual, expected)
-
-    if expected.node.value is not None and actual.node.value != expected.node.value:
-        return Diff.values_mismatch(actual, expected)
-
-    return None
-
-    node_diff = self._diff_node(actual)
-    return self._diff_children(actual) if node_diff is None else node_diff
-
 
 class ChildrenDiffBuilder(object):
     def __init__(self, actual_parent, expected_parent):
@@ -627,7 +681,7 @@ def test_describe():
             ]))
         ])
 
-    print r
+    #print r
 
 
 def test_good_list():
@@ -642,15 +696,15 @@ def test_good_list():
         AtomNode(3)
     ])
 
-    assert expected.fit(actual) is True
-    assert actual.fit(expected) is False
+    assert expected.fit(actual)
+    assert not actual.fit(expected)
 
 
 def test_formula():
     actual = ListNode([
         ListNode([
+            NamedNode('fee', AtomNode(10)),
             NamedNode('bid', AtomNode(1)),
-            NamedNode('fee', AtomNode(10))
         ]),
         ListNode([
             NamedNode('bid', AtomNode(2)),
@@ -662,35 +716,68 @@ def test_formula():
         ])
     ])
 
-    # check bid increase, fee decrease, bid+fee=11
-    # value -- list of captured values
     # diag -- extra values check
     bid = CaptureNode()
     fee = CaptureNode()
     expected = ListNode([NamedNode('bid', bid), NamedNode('fee', fee)])
-    assert expected.fit(actual) is True
+    assert expected.fit(actual)
     assert bid + fee == 11
-    assert bid.Increased()
-    assert fee.Decreased()
+    assert bid.increased() is True
 
 
-def test_bad_list():
-    actual = Actual(Node(name='list', children=[
-        Actual(Node(name='0', value=1, props={Node.NAMELESS})),
-        Actual(Node(name='1', value=2, props={Node.NAMELESS})),
-        Actual(Node(name='2', value=3, props={Node.NAMELESS}))
-    ]))
+def test_missed_value():
+    actual = ListNode([
+        AtomNode(1),
+        AtomNode(2),
+        AtomNode(3),
+    ])
 
-    expected = Expected(node=Node(name='list', children=[
-        Expected(Node(name='0', value=2, props={Node.NAMELESS})),
-        Expected(Node(name='1', value=4, props={Node.NAMELESS}))
-    ]))
+    expected = ListNode([
+        AtomNode(1),
+        AtomNode(4),
+    ])
 
-    actout = expected.diff(actual)
-    reasons = actout.prune().leafs()
-    assert len(reasons) == 2
-    assert reasons[0].expected.node.value == 4 and reasons[0].actual.node.value == 1
-    assert reasons[1].expected.node.value == 4 and reasons[1].actual.node.value == 3
+    # error:
+    # - cannot find 4 (*)
+    #   - 4 != 2  (good if one)
+    #   - 4 != 3
+
+    result = expected.fit(actual)
+
+    #reasons = result.prune().leafs()
+    #assert len(reasons) == 2
+    #assert reasons[0].expected.node.value == 4 and reasons[0].actual.node.value == 1
+    #assert reasons[1].expected.node.value == 4 and reasons[1].actual.node.value == 3
+
+    """
+    green -- matched parts
+    yellow -- suspicios actual parts
+    red -- non-matched expected parts
+
+    [1, 2, 3] vs [1, 4] => no element 4
+    [1, 2] vs [1, 4] => no element 4, due to 2 != 4
+    {'a':1, 'b':2, 'c':3} vs {'a':1, 'c':4} => no element 'c':4 due to 'c':3
+    {'a':1, 'b':2, 'c':3} vs {'a':1, 'd':4} => no element 'd':4
+    {'a':1, 'b':2} vs {'a':1, 'd':4} => no element 'd':4
+    # error:
+      - cannot find "green" : 4
+        - green != blue (good if one)
+        - 4 != 3 (*) (green == green)
+    actual = ListNode([
+        NamedNode("red", AtomNode(1)),
+        NamedNode("blue", AtomNode(2)),
+        NamedNode("green", AtomNode(3)),
+    ])
+
+    expected = ListNode([
+        NamedNode("red", AtomNode(1)),
+        NamedNode("green", AtomNode(4)),
+    ])
+
+    actual = {
+
+    }
+    """
 
 
 def test_bad_list_ordered():
@@ -852,7 +939,8 @@ def test_json_encode_bad():
 if __name__ == '__main__':
     test_describe()
     test_good_list()
-    """test_bad_list()
+    test_formula()
+    """test_missed_value()
     test_bad_list_ordered()
     test_good_list_ordered()
     test_good_list_ordered2()
